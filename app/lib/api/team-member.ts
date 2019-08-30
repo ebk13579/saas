@@ -1,5 +1,7 @@
 import sendRequestAndGetResponse from './sendRequestAndGetResponse';
 
+import { LAMBDA_API_ENDPOINT } from '../consts';
+
 const BASE_PATH = '/api/v1/team-member';
 
 export const getInitialData = (options: any = {}) =>
@@ -12,18 +14,6 @@ export const getInitialData = (options: any = {}) =>
       options,
     ),
   );
-
-export const getTopicList = (teamId: string) =>
-  sendRequestAndGetResponse(`${BASE_PATH}/topics/list`, {
-    method: 'GET',
-    qs: { teamId },
-  });
-
-export const getPrivateTopic = (teamId: string, topicSlug: string) =>
-  sendRequestAndGetResponse(`${BASE_PATH}/topics/private-topic`, {
-    method: 'GET',
-    qs: { teamId, topicSlug },
-  });
 
 export const getDiscussionList = (params): Promise<{ discussions: any[] }> =>
   sendRequestAndGetResponse(`${BASE_PATH}/discussions/list`, {
@@ -74,10 +64,9 @@ export const deletePost = data =>
 
 // Uploading file to S3
 
-export const getSignedRequestForUpload = ({ file, prefix, bucket, acl = 'private' }) =>
+export const getSignedRequestForUpload = ({ file, prefix, bucket, acl = 'public-read' }) =>
   sendRequestAndGetResponse(`${BASE_PATH}/aws/get-signed-request-for-upload-to-s3`, {
-    method: 'GET',
-    qs: { fileName: file.name, fileType: file.type, prefix, bucket, acl },
+    body: JSON.stringify({ fileName: file.name, fileType: file.type, prefix, bucket, acl }),
   });
 
 export const uploadFileUsingSignedPutRequest = (file, signedRequest, headers = {}) =>
@@ -90,5 +79,16 @@ export const uploadFileUsingSignedPutRequest = (file, signedRequest, headers = {
 
 export const updateProfile = data =>
   sendRequestAndGetResponse(`${BASE_PATH}/user/update-profile`, {
+    body: JSON.stringify(data),
+  });
+
+export const toggleTheme = data =>
+  sendRequestAndGetResponse(`${BASE_PATH}/user/toggle-theme`, {
+    body: JSON.stringify(data),
+  });
+
+export const sendDataToLambda = data =>
+  sendRequestAndGetResponse(`${LAMBDA_API_ENDPOINT}/`, {
+    externalServer: true,
     body: JSON.stringify(data),
   });

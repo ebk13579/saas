@@ -8,6 +8,15 @@ import Post from '../models/Post';
 import Team from '../models/Team';
 import User from '../models/User';
 
+import {
+  discussionAdded,
+  discussionDeleted,
+  discussionEdited,
+  postAdded,
+  postDeleted,
+  postEdited,
+} from '../realtime';
+
 const router = express.Router();
 
 router.use((req, res, next) => {
@@ -24,15 +33,13 @@ async function loadDiscussionsData(team, userId, body) {
   const { discussionSlug } = body;
 
   if (!discussionSlug) {
-    return {};
+    return [];
   }
 
   const { discussions } = await Discussion.getList({
     userId,
     teamId: team._id,
   });
-
-  const data: any = { initialDiscussions: discussions };
 
   for (const discussion of discussions) {
     if (discussion.slug === discussionSlug) {
@@ -47,7 +54,7 @@ async function loadDiscussionsData(team, userId, body) {
     }
   }
 
-  return data;
+  return discussions;
 }
 
 async function loadTeamData(team, userId, body) {
@@ -64,9 +71,9 @@ async function loadTeamData(team, userId, body) {
     });
   }
 
-  Object.assign(team, await loadDiscussionsData(team, userId, body));
+  const initialDiscussions = await loadDiscussionsData(team, userId, body);
 
-  const data: any = { initialMembers, initialInvitations };
+  const data: any = { initialMembers, initialInvitations, initialDiscussions };
 
   return data;
 }
@@ -105,14 +112,17 @@ router.get('/teams', async (req, res, next) => {
 
 router.post('/discussions/add', async (req, res, next) => {
   try {
-    const { name, teamId, memberIds = [] } = req.body;
+    const { name, teamId, memberIds = [], notificationType, socketId } = req.body;
 
     const discussion = await Discussion.add({
       userId: req.user.id,
       name,
       teamId,
       memberIds,
+      notificationType,
     });
+
+    discussionAdded({ socketId, discussion });
 
     res.json({ discussion });
   } catch (err) {
@@ -122,14 +132,17 @@ router.post('/discussions/add', async (req, res, next) => {
 
 router.post('/discussions/edit', async (req, res, next) => {
   try {
-    const { name, id, memberIds = [] } = req.body;
+    const { name, id, memberIds = [], notificationType, socketId } = req.body;
 
-    await Discussion.edit({
+    const updatedDiscussion = await Discussion.edit({
       userId: req.user.id,
       name,
       id,
       memberIds,
+      notificationType,
     });
+
+    discussionEdited({ socketId, discussion: updatedDiscussion });
 
     res.json({ done: 1 });
   } catch (err) {
@@ -139,9 +152,11 @@ router.post('/discussions/edit', async (req, res, next) => {
 
 router.post('/discussions/delete', async (req, res, next) => {
   try {
-    const { id } = req.body;
+    const { id, socketId } = req.body;
 
-    await Discussion.delete({ userId: req.user.id, id });
+    const { teamId } = await Discussion.delete({ userId: req.user.id, id });
+
+    discussionDeleted({ socketId, teamId, id });
 
     res.json({ done: 1 });
   } catch (err) {
@@ -168,9 +183,11 @@ router.get('/discussions/list', async (req, res, next) => {
 
 router.post('/posts/add', async (req, res, next) => {
   try {
-    const { content, discussionId } = req.body;
+    const { content, discussionId, socketId } = req.body;
 
     const post = await Post.add({ userId: req.user.id, content, discussionId });
+
+    postAdded({ socketId, post });
 
     res.json({ post });
   } catch (err) {
@@ -180,9 +197,11 @@ router.post('/posts/add', async (req, res, next) => {
 
 router.post('/posts/edit', async (req, res, next) => {
   try {
-    const { content, id } = req.body;
+    const { content, id, socketId } = req.body;
 
-    await Post.edit({ userId: req.user.id, content, id });
+    const updatedPost = await Post.edit({ userId: req.user.id, content, id });
+
+    postEdited({ socketId, post: updatedPost });
 
     res.json({ done: 1 });
   } catch (err) {
@@ -192,9 +211,11 @@ router.post('/posts/edit', async (req, res, next) => {
 
 router.post('/posts/delete', async (req, res, next) => {
   try {
-    const { id } = req.body;
+    const { id, socketId, discussionId } = req.body;
 
     await Post.delete({ userId: req.user.id, id });
+
+    postDeleted({ socketId, id, discussionId });
 
     res.json({ done: 1 });
   } catch (err) {
@@ -216,9 +237,9 @@ router.get('/posts/list', async (req, res, next) => {
 });
 
 // Upload file to S3
-router.get('/aws/get-signed-request-for-upload-to-s3', async (req, res, next) => {
+router.post('/aws/get-signed-request-for-upload-to-s3', async (req, res, next) => {
   try {
-    const { fileName, fileType, prefix, bucket, acl = 'private' } = req.query;
+    const { fileName, fileType, prefix, bucket, acl } = req.body;
 
     const returnData = await signRequestForUpload({
       fileName,
@@ -246,6 +267,18 @@ router.post('/user/update-profile', async (req, res, next) => {
     });
 
     res.json({ updatedUser });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.post('/user/toggle-theme', async (req, res, next) => {
+  try {
+    const { darkTheme } = req.body;
+
+    await User.toggleTheme({ userId: req.user.id, darkTheme });
+
+    res.json({ done: 1 });
   } catch (err) {
     next(err);
   }

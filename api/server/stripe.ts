@@ -3,11 +3,11 @@ import * as stripe from 'stripe';
 import logger from './logs';
 import Team from './models/Team';
 
-const dev = process.env.NODE_ENV !== 'production';
-
-const API_KEY = dev ? process.env.Stripe_Test_SecretKey : process.env.Stripe_Live_SecretKey;
-const PLAN_ID = dev ? process.env.Stripe_Test_PlanId : process.env.Stripe_Live_PlanId;
-const ENDPOINT_SECRET = process.env.Stripe_Live_EndpointSecret;
+import {
+  STRIPE_LIVE_ENDPOINTSECRET as ENDPOINT_SECRET,
+  STRIPE_PLANID as PLAN_ID,
+  STRIPE_SECRETKEY as API_KEY,
+} from './consts';
 
 const stripeInstance = new stripe(API_KEY);
 
@@ -60,7 +60,7 @@ function updateCustomer({ customerId, newCardId }) {
 }
 
 function verifyWebHook(request) {
-  const event = stripeInstance.webhooks.constructEvent<any>(
+  const event = stripeInstance.webhooks.constructEvent(
     request.body,
     request.headers['stripe-signature'],
     ENDPOINT_SECRET,
@@ -75,9 +75,11 @@ function stripeWebHooks({ server }) {
     async (req, res, next) => {
       try {
         const event = await verifyWebHook(req);
-        logger.info(event.id);
+        // logger.info(JSON.stringify(event.data.object));
+        // @ts-ignore
+        // some problem with @types/stripe ?
         const { subscription } = event.data.object;
-        logger.info(JSON.stringify(subscription));
+        // logger.info(JSON.stringify(subscription));
         await Team.cancelSubscriptionAfterFailedPayment({
           subscriptionId: JSON.stringify(subscription),
         });
@@ -92,7 +94,7 @@ function stripeWebHooks({ server }) {
 
 function getListOfInvoices({ customerId }) {
   logger.debug('getting list of invoices for customer', customerId);
-  return stripeInstance.invoices.list({ customer: customerId });
+  return stripeInstance.invoices.list({ customer: customerId, limit: 100 });
 }
 
 export {

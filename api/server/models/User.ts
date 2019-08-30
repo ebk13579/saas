@@ -5,7 +5,7 @@ import sendEmail from '../aws-ses';
 import logger from '../logs';
 import { subscribe } from '../mailchimp';
 import { generateSlug } from '../utils/slugify';
-import getEmailTemplate from './EmailTemplate';
+import getEmailTemplate, { EmailTemplate } from './EmailTemplate';
 import Invitation from './Invitation';
 import Team from './Team';
 
@@ -17,13 +17,15 @@ import {
   updateCustomer,
 } from '../stripe';
 
+import { EMAIL_SUPPORT_FROM_ADDRESS } from '../consts';
+
 mongoose.set('useFindAndModify', false);
 
 const mongoSchema = new mongoose.Schema({
   googleId: {
     type: String,
-    required: true,
     unique: true,
+    sparse: true,
   },
   googleToken: {
     accessToken: String,
@@ -98,6 +100,7 @@ const mongoSchema = new mongoose.Schema({
       },
     ],
   },
+  darkTheme: Boolean,
 });
 
 export interface IUserDocument extends mongoose.Document {
@@ -149,8 +152,9 @@ export interface IUserDocument extends mongoose.Document {
         teamId: string;
         teamName: string;
       }
-    ]
+    ];
   };
+  darkTheme: boolean;
 }
 
 interface IUserModel extends mongoose.Model<IUserDocument> {
@@ -161,9 +165,9 @@ interface IUserModel extends mongoose.Model<IUserDocument> {
     name,
     avatarUrl,
   }: {
-  userId: string;
-  name: string;
-  avatarUrl: string;
+    userId: string;
+    name: string;
+    avatarUrl: string;
   }): Promise<IUserDocument[]>;
 
   getTeamMembers({ userId, teamId }: { userId: string; teamId: string }): Promise<IUserDocument[]>;
@@ -175,35 +179,33 @@ interface IUserModel extends mongoose.Model<IUserDocument> {
     displayName,
     avatarUrl,
   }: {
-  googleId: string;
-  email: string;
-  displayName: string;
-  avatarUrl: string;
-  googleToken: { refreshToken?: string; accessToken?: string };
+    googleId: string;
+    email: string;
+    displayName: string;
+    avatarUrl: string;
+    googleToken: { refreshToken?: string; accessToken?: string };
   }): Promise<IUserDocument>;
+
+  signUpByEmail({ uid, email }: { uid: string; email: string }): Promise<IUserDocument>;
 
   createCustomer({
     userId,
     stripeToken,
   }: {
-  userId: string;
-  stripeToken: object;
+    userId: string;
+    stripeToken: object;
   }): Promise<IUserDocument>;
 
   createNewCardUpdateCustomer({
     userId,
     stripeToken,
   }: {
-  userId: string;
-  stripeToken: object;
+    userId: string;
+    stripeToken: object;
   }): Promise<IUserDocument>;
   getListOfInvoicesForCustomer({ userId }: { userId: string }): Promise<IUserDocument>;
+  toggleTheme({ userId, darkTheme }: { userId: string; darkTheme: boolean }): Promise<void>;
 }
-
-// mongoSchema.pre('save', function(next) {
-//   if (!this.createdAt) this.createdAt = new Date();
-//   next();
-// });
 
 class UserClass extends mongoose.Model {
   public static async updateProfile({ userId, name, avatarUrl }) {
@@ -275,17 +277,23 @@ class UserClass extends mongoose.Model {
 
     logger.debug('called static method on User');
 
+    logger.debug(user.stripeCustomer.id);
+
+    if (!user.stripeCustomer.id) {
+      throw new Error('You are not a customer and you have no payment history.');
+    }
+
     const newListOfInvoices = await getListOfInvoices({
       customerId: user.stripeCustomer.id,
     });
 
+    if (newListOfInvoices.data === undefined || newListOfInvoices.data.length === 0) {
+      throw new Error('You are a customer. But there is no payment history.');
+    }
+
     const modifier = {
       stripeListOfInvoices: newListOfInvoices,
     };
-
-    if (!newListOfInvoices) {
-      throw new Error('There is no payment history.');
-    }
 
     return this.findByIdAndUpdate(userId, { $set: modifier }, { new: true, runValidators: true })
       .select('stripeListOfInvoices')
@@ -300,9 +308,7 @@ class UserClass extends mongoose.Model {
       .setOptions({ lean: true });
   }
 
-  public static async signInOrSignUp({
-    googleId, email, googleToken, displayName, avatarUrl,
-  }) {
+  public static async signInOrSignUp({ googleId, email, googleToken, displayName, avatarUrl }) {
     const user = await this.findOne({ googleId })
       .select(this.publicFields().join(' '))
       .setOptions({ lean: true });
@@ -341,14 +347,20 @@ class UserClass extends mongoose.Model {
 
     const hasInvitation = (await Invitation.countDocuments({ email })) > 0;
 
-    const template = await getEmailTemplate('welcome', {
-      userName: displayName,
+    const emailTemplate = await EmailTemplate.findOne({ name: 'welcome' }).setOptions({
+      lean: true,
     });
+
+    if (!emailTemplate) {
+      throw new Error('welcome Email template not found');
+    }
+
+    const template = await getEmailTemplate('welcome', { userName: displayName }, emailTemplate);
 
     if (!hasInvitation) {
       try {
         await sendEmail({
-          from: `Kelly from async-await.com <${process.env.EMAIL_SUPPORT_FROM_ADDRESS}>`,
+          from: `Kelly from async-await.com <${EMAIL_SUPPORT_FROM_ADDRESS}>`,
           to: [email],
           subject: template.subject,
           body: template.message,
@@ -359,10 +371,60 @@ class UserClass extends mongoose.Model {
     }
 
     try {
-      await subscribe({
-        email,
-        listName: 'signups',
-      });
+      await subscribe({ email, listName: 'signups' });
+    } catch (error) {
+      logger.error('Mailchimp error:', error);
+    }
+
+    return _.pick(newUser, this.publicFields());
+  }
+
+  public static async signUpByEmail({ uid, email }) {
+    const user = await this.findOne({ email })
+      .select(this.publicFields().join(' '))
+      .setOptions({ lean: true });
+
+    if (user) {
+      throw Error('User already exists');
+    }
+
+    const slug = await generateSlug(this, email);
+
+    const newUser = await this.create({
+      _id: uid,
+      createdAt: new Date(),
+      email,
+      slug,
+      defaultTeamSlug: '',
+    });
+
+    const hasInvitation = (await Invitation.countDocuments({ email })) > 0;
+
+    const emailTemplate = await EmailTemplate.findOne({ name: 'welcome' }).setOptions({
+      lean: true,
+    });
+
+    if (!emailTemplate) {
+      throw new Error('welcome Email template not found');
+    }
+
+    const template = await getEmailTemplate('welcome', { userName: email }, emailTemplate);
+
+    if (!hasInvitation) {
+      try {
+        await sendEmail({
+          from: `Kelly from async-await.com <${EMAIL_SUPPORT_FROM_ADDRESS}>`,
+          to: [email],
+          subject: template.subject,
+          body: template.message,
+        });
+      } catch (err) {
+        logger.error('Email sending error:', err);
+      }
+    }
+
+    try {
+      await subscribe({ email, listName: 'signups' });
     } catch (error) {
       logger.error('Mailchimp error:', error);
     }
@@ -384,6 +446,7 @@ class UserClass extends mongoose.Model {
       'stripeCustomer',
       'stripeCard',
       'stripeListOfInvoices',
+      'darkTheme',
     ];
   }
 
@@ -402,10 +465,19 @@ class UserClass extends mongoose.Model {
 
     return team;
   }
+
+  public static toggleTheme({ userId, darkTheme }) {
+    return this.updateOne({ _id: userId }, { darkTheme: !!darkTheme });
+  }
 }
 
 mongoSchema.loadClass(UserClass);
 
 const User = mongoose.model<IUserDocument, IUserModel>('User', mongoSchema);
+User.ensureIndexes(err => {
+  if (err) {
+    logger.error(`User.ensureIndexes: ${err.stack}`);
+  }
+});
 
 export default User;
